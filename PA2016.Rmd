@@ -1,0 +1,1319 @@
+---
+title: "Investigating 2016 PA Presidential Election Contributions"
+date: "18 May 2018"
+author: "Sean Angiolillo"
+output:
+  html_document:
+    keep_md: yes
+    number_sections: yes
+    theme: cosmo
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+options(knitr.table.format = "html") 
+```
+
+```{r message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(maps)
+library(ggmap)
+library(grid)
+library(gridExtra)
+library(waffle)
+library(RColorBrewer)
+library(knitr)
+library(kableExtra)
+library(viridis)
+library(DT)
+library(ggiraph)
+library(ggiraphExtra)
+library(rvest)
+```
+
+# Overview
+
+This report examines the 2016 Presidential Campaign Finance contributor report for the state of Pennsylvania, as provided by the Federal Election Commission (FEC).  Its main objective is to describe the flow of financial contributions to US presidential candidates in terms of their size, date and geography within the state of Pennsylvania. 
+
+The report documents how, in the course of the 2016 presidential campagin, Hillary Clinton received nearly \$13m in contributions from individuals in the state of Pennsylvania, far more than the next closest candidate, Donald Trump, at approximately \$4m. In fact, Clinton's total was more than all 23 other candidates combined. 
+
+Nevertheless, when grouping contributions by unique individuals, it becomes evident that Clinton actually gained her $9m advantage from fewer distinct individuals than Trump. The stark difference in percentage of a candidate's contributions coming from unique individuals (as opposed to repeat donations from the same individual) may reveal something important about the candidates' actual base of support.
+
+It is also interesting to compare the geographic distribution of political contributions and presidential votes. The Democrats' fundraising advantage was geographically concentrated in urban centers. Democrats outraised Republicans in only 26 of 67 counties despite raising an additional \$6.4m.
+
+We would expect to find a relationship between the party raising the most money in a county and the party receiving the most votes. In 50 counties, the party raising the most money did see its candidate receive the most votes. However, in 16 counties, Trump received more votes than Clinton despite Democrats outraising Republicans in the same county. In only 1 county did Clinton outperform Trump at the ballot booth despite Republicans outraising Democrats. In fact, in nearly all cases, Clinton's share in the vote was less than the share of political contributions slated for Democratic candidates.
+
+I have hidden the code in the final document for easier viewing, but please do see the original .Rmd or .md for the code producing this report.
+
+# Importing the Data
+
+The original data, as provided by the Federal Election Commission (FEC), was found [here](http://fec.gov/disclosurep/PDownload.do), but it appears it is no longer available as they are updating their website. Please find the csv file in the Github repository until the new link can be given. Please note that the data does not include any super-PAC money, which by its nature is not officially donated to candidates themselves.
+
+```{r message=FALSE, warning=FALSE}
+# original link given but may no longer be available
+if (!file.exists("P00000001-PA.csv")) {
+    url <- "ftp://ftp.fec.gov/FEC/Presidential_Map/2016/P00000001/P00000001-PA.zip"
+    download.file(url, dest = "P00000001-PA.csv", mode = "wb") 
+}
+
+pcf <- read_csv('P00000001-PA.csv')
+```
+
+Here is a brief look at our initial raw dataset.
+
+```{r}
+kable(
+    head(pcf)
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+
+After taking a first look at the data, here are a few initial observations:
+
+* Most of the missing values are for variables we will ignore. `election_tp` is the lone exception, but has relatively few missing values.
+
+```{r}
+kable(
+    pcf %>%
+        map_df(~ sum(is.na(.))) %>%
+        gather(feature, num_na),
+    col.names = c("Variable", "Number Missing"),
+    format.args = list(big.mark = ","),
+    caption = "Missing Data"
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+* We have an equal number of unique `cand_id` and `cand_nm`, which suggests there are no errors there. We would likely want to treat candidates as a factor variable. Last name is sufficient to distinguish candidates so we can create that variable for clearer plots.
+
+```{r include=FALSE}
+length(unique(pcf$cand_nm)) == length(unique(pcf$cand_id))
+
+pcf <- pcf %>%
+    separate(cand_nm, into = c("cand_last", "cand_first"), 
+             sep = ",", remove = FALSE) %>%
+    select(-cand_first)
+```
+
+* `r format(length(unique(pcf$contbr_nm)), big.mark = ",")` `contb_nm` out of `r format(nrow(pcf), big.mark = ",")` observations. That means a lot of repeat donors as shown below. How this percentage varies by candidate is something that will be explored.
+
+```{r}
+kable(
+    pcf %>%
+        summarize(unique_contributors = n_distinct(contbr_nm),
+              n_observations = nrow(.),
+              percent_unique = unique_contributors / n_observations),
+    align = "c",
+    col.names = c("Unique Contributors", "Total Observations", "Percent Unique"),
+    format.args = list(big.mark = ","),
+    digits = 3
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")   
+```
+
+* `contbr_st` is all PA as it should be.
+
+* `contbr_zip` has a mix of 5 digit and 9 digit zip codes. Looking at min and max values alone suggests at least some errors.
+
+* `contb_receipt_amt`: Our only true numeric variable surprisingly has many negative values.
+
+* `contb_receipt_dt`: We should convert to date format.
+
+* `tran_id`: Surprisingly not a primary key so it is unclear what this variable represents.
+
+```{r include=FALSE}
+pcf %>% 
+    count(tran_id) %>%
+    filter(n > 1)
+```
+
+* `election_tp`: A few correctable errors and some missing data
+
+```{r include=FALSE}
+pcf %>%
+    count(election_tp)
+```
+
+* The dataset lacks any party affiliation data, but this can be easily mutated.
+
+* I can drop the following variables: `cmte_id`, `cand_id`, `contbr_city`, `contbr_st`, `contbr_employer`, `contbr_occupation`, `form_tp`, `file_num`, `tran_id`.
+
+```{r}
+drop_cols <- c("cmte_id", "cand_id", "contbr_city", "contbr_st", "contbr_employer", "contbr_occupation", "form_tp", "file_num", "tran_id")
+
+pcf <- pcf %>%
+    select(-one_of(drop_cols))
+```
+
+# Data Wrangling
+
+## Investigating election_tp
+
+First, we can solve a few small problems in `election_tp`.
+
+```{r}
+kable(
+    pcf %>%
+        count(election_tp),
+    align = "l",
+    format.args = list(big.mark = ",")
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+* `G2106` must be a simple error. We can recode that. 
+
+* `O2016` is 'Other 2016'. All of these donations seem to be for Jill Stein's recount effort after the November General election. We should exclude this data because the focus of the report is to investigate how fundraising (prior to the election) impacted the outcome of the election.
+
+* `P2020` seems like a celebratory donation after the election so we would want to remove it anyway. This will happen when we clean up `contb_receipt_dt`.
+
+* It is not clear why `r sum(is.na(pcf$election_tp))` are blank at the moment, and so they should remain in the dataset.
+
+```{r}
+pcf <- pcf %>%
+    filter(!election_tp == "O2016" | is.na(election_tp)) %>%
+    mutate(
+        election_tp = ifelse(
+            election_tp == "G2106", "G2016", election_tp
+            )
+    )
+```
+
+## Investigating contb_receipt_dt
+
+`contb_receipt_dt` needs to be converted from an integer to a Date format. Moreover, 2,475 contributions after the date of the election will be excluded.
+
+```{r}
+pcf <- pcf %>%
+    mutate(contb_receipt_dt = dmy(contb_receipt_dt)) %>%
+    filter(contb_receipt_dt <= "2016-11-07")
+```
+
+## Investigating contb_receipt_amt
+
+Starting with a histogram or density plot, we can see a few very negative values in the dataset.
+
+```{r}
+ggplot(data = pcf, aes(x = contb_receipt_amt)) + 
+    geom_density() +
+    labs(title = "Negative values and large positive contributions need to be assessed")
+```
+
+```{r include=FALSE}
+non_pos_contbr <- pcf %>%
+    filter(contb_receipt_amt < 0) %>%
+    nrow()
+```
+
+We can take a look at the most negative contributions and note that many have a `receipt_desc` marked as "Refund". Some are reattributed to other individuals; others have no explanation. Altogether there are `r format(non_pos_contbr, big.mark = ",")` non-positive contributions.  
+
+```{r}
+kable(
+    pcf %>%
+        arrange(contb_receipt_amt) %>%
+        select(contbr_nm, contb_receipt_amt, receipt_desc) %>%
+        head()
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+```{r include=FALSE}
+large_contbr <- pcf %>%
+    filter(contb_receipt_amt > 2700) %>%
+    nrow()
+```
+
+On the other hand we have some very large contributions. `r format(large_contbr, big.mark = ",")` contributions exceed the maximum legal limit of $2,700.[^1]
+
+[^1]: According to the [FEC](https://transition.fec.gov/pages/brochures/citizens.shtml), $2,700 is the maximum amount an individual can contribute to a federal candidate. Primary and general elections are considered separate elections. 
+
+Ideally, it would be possible to match up positive and negative contributions from each contributor, but there seems to be no reliable way to do that from the data at hand. `contbr_nm` is not a primary key (people have the same names and small errors are easy to find). 
+
+The simplifying solution taken was to remove all contributions below zero and above $2,700. This is a fairly crude measure because individuals can make multiple smaller contributions that if exceeding the maximum limit, they would need to be capped (rather than excluded) to the limit. At the same time, considering the number of observations in the dataset, these cases represent a small fraction. Moreover, even if legitimate, these large contributions are outliers by any stretch and mostly would serve to conceal patterns in the vast majority of the data.
+
+```{r}
+pcf <- pcf %>%
+    filter(!contb_receipt_amt <= 0,
+           !contb_receipt_amt > 2700)
+```
+
+## Investigating contbr_zip
+
+`contbr_zip` data includes some five digit and some nine digit zip codes. I broke these into separate columns to enable analysis by zip code.
+
+```{r}
+pcf <- pcf %>%
+    separate(contbr_zip, into = c("contbr_zip5", "zip_extra"), sep = 5)
+```
+
+Sorting this list and viewing the head or tail reveals obvious errors. Quite a few are given as "99999""; some are a single digit; and others belong to another state. However since all states are listed as "PA", I chose not to exclude them. These are probably simple errors or perhaps people who live in two states.
+
+## Investigating receipt description
+
+`receipt_desc`, `memo_cd`, and `memo_text` are variables that are not particularly well documented. Many, but not all of them are contributions flagged for refund. Others are redesignations or reattributions. Given that there are so few of them compared to the rest of the dataset, I will exclude any observations with special notes to ensure cleanliness of the data, even if a very small number of legitimate contributions are excluded.
+
+```{r}
+kable(
+    pcf %>%
+        count(receipt_desc, sort = TRUE) %>%
+        head(),
+    format.args = list(big.mark = ",")
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+```{r}
+pcf <- pcf %>%
+    filter(is.na(receipt_desc))
+```
+
+## Investigating memo text
+
+`memo_cd` marks if a memo is attached to the contribution (though not always). These memos, found in `memo_text` note earmarked contributions, or specific candidates like "Hillary Victory Fund". This seems to pose no harm to the dataset.
+
+```{r}
+kable(
+    pcf %>%
+        count(memo_text, sort = TRUE) %>%
+        head(),
+    format.args = list(big.mark = ",")
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+## Adding party affiliation
+
+The dataset did not have a variable for party affiliation so we can add it and represent it as a factor.
+
+```{r}
+party_details <- tribble(
+    ~party, ~abb,
+    "Democrat", "D",
+    "Republican", "R",
+    "Independent", "I", 
+    "Green", "G"
+)
+
+pcf <- pcf %>%
+    mutate(
+        party_abb = case_when(
+            cand_nm == "Johnson, Gary"            ~ "I",
+            cand_nm == "Stein, Jill"              ~ "G",
+            cand_nm == "Webb, James Henry Jr."    ~ "D",
+            cand_nm == "Lessig, Lawrence"         ~ "D",
+            cand_nm == "O'Malley, Martin Joseph"  ~ "D", 
+            cand_nm == "Sanders, Bernard"         ~ "D",
+            cand_nm == "Clinton, Hillary Rodham"  ~ "D",
+            TRUE                                  ~ "R"
+        )
+    ) %>%
+    left_join(party_details, by = c("party_abb" = "abb")) %>%
+    mutate(party_abb = factor(party_abb),
+           party = factor(party))
+```
+
+## Assign blank election_tp
+
+My last step in data wrangling will be to assign observations with empty election_tp values. Nearly all of the `r sum(is.na(pcf$election_tp))` observations with a blank `election_tp` were for Donald Trump. 
+
+```{r}
+kable(
+    pcf %>%
+        filter(is.na(election_tp)) %>%
+        count(cand_nm),
+    col.names = c("Candidate", "No. election_tp missing"),
+    align = "l"
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+Observations for candidates other than Trump could only be assigned to "P2016". Trump officially secured his party's nomination on 20 July 2016. Hence, any donation before that date will be marked for the primary and thereafter for the general.
+
+```{r}
+pcf <- pcf %>%
+    mutate(
+        election_tp = case_when(
+            cand_nm == "McMullin, Evan"                                      ~ "P2016",
+            cand_nm == "Stein, Jill"                                         ~ "P2016",
+            cand_nm == "Trump, Donald J." & contb_receipt_dt < "2016-07-20"  ~ "P2016",
+            cand_nm == "Trump, Donald J." & contb_receipt_dt >= "2016-07-20" ~ "G2016",
+            TRUE ~ election_tp
+        )
+    )
+```
+
+# Exploratory Data Analysis
+
+Before really diving into the analysis, a few univariate plots help sense-check the data and ensure that data wrangling was sufficient.
+
+## The Most Common Contribution Amounts
+
+A histogram of `contb_receipt_amt` shows a highly right-skewed plot, with the vast majority of contributions less than $100 and a few contributions much higher, including at the maximum limit. We can also notice the lack of smoothness in the distribution because people tend to contribute in round numbers when they donate.
+
+```{r}
+ggplot(pcf, aes(x = contb_receipt_amt)) +
+    geom_histogram(binwidth = 10) +
+    labs(title = "Highly right-skewed frequency of contribution amounts",
+         x = "Contribution Amount ($)", y = "Count")
+```
+
+## The Pace of Donations over the Campaign
+
+We can plot the number of contributions on each day to determine the pace at which contributions were received. The plot below shows just how long the campaign was with the first contributions coming in as early as 2014. The frequency though of course really picks up in 2016. The plot also suggests there were considerable day-to-day differences in the number of contributions. Some days were clearly more popular for donating than others, even in the heat of the campaign.
+
+I have also colored the plot by `election_tp` to show contributions designated for the primary or general elections. We notice the shift shortly after June 2016 when most contributions are marked for general. Nevertheless, we see small numbers of contributions marked for the primary even after they have finished. We can also observe a greater number of primary contributions (when there were more candidates) than for the general.
+
+```{r}
+ym_breaks <- seq(min(pcf$contb_receipt_dt), max(pcf$contb_receipt_dt), by = "2 months")
+
+pcf %>%
+    group_by(contb_receipt_dt, election_tp) %>%
+    summarise(n = n()) %>%
+    ggplot(aes(x = contb_receipt_dt, y = n, color = election_tp)) +
+    geom_point(size = 0.1) +
+    scale_y_continuous("Count", label = scales::comma) +
+    scale_x_date(NULL, breaks = ym_breaks, date_labels = "%m-%y") +
+    labs(color = "Election",
+         title = "Frequency of Contributions accelerates around Sept 2015",
+         subtitle = "Contributions shift to General election around Aug 2016") +
+    guides(colour = guide_legend(override.aes = list(size = 2))) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    theme(legend.position = "bottom")
+```
+
+## Repetition in Contributors
+
+Do most contributors usually just give once? Or do they donate repeatedly? The output below does not tell us anything about the amounts donated. Instead, it shows that while some people donate repeatedly, it is most common just to donate once. There is an inverse relationship between the number of contributions and the number of people making that number of contributions.
+
+As the number of donations from a single contributor increases, the number of people making that number of donations decreases. (Although we cannot see any points far on the right side of the x-axis, we know there must be at least one observation that far out given it has been included in the default scale).
+
+```{r}
+pcf %>%
+    count(contbr_nm) %>%
+    ggplot(aes(x = n)) +
+        geom_histogram(bins = 200) +
+    scale_y_continuous("Count", labels = scales::comma) +
+    labs(x = "Number of Contributions from a Single Individual",
+         title = "Most contributors donate just once",
+         subtitle = "But a handful make over 100 separate donations")
+```
+
+We can see this disparity in a table as well. One can observe a huge drop between the number of people donating once versus those donating twice. Moreover, this trend continues as the number of donations from a single person increases.
+
+```{r}
+kable(
+    pcf %>%
+        count(contbr_nm, sort = TRUE) %>%
+        count(n) %>%
+        rename(donation_count = n,
+               n = nn) %>%
+        head(10),
+    format.args = list(big.mark = ",")
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")   
+```
+
+At the same time, there are indeed a handful of individuals who donated more than 100 times. The extent to which this pattern varies by candidate will be explored later in the report.
+
+```{r}
+kable(
+    pcf %>%
+        count(contbr_nm, sort = TRUE) %>%
+        head(10)
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+## Aggregate Donations by Party and Candidate
+
+With some sense checks done, we can try to answer some basic questions. Which party (and which candidate) raised the largest amount of money? First, it is clear that Democrats outraised Republicans by a huge margin.
+
+```{r}
+kable(
+    pcf %>%
+        group_by(party) %>%
+        summarise(total = sum(contb_receipt_amt)) %>%
+        arrange(-total),
+    format.args = list(big.mark = ","),
+    col.names = c("Party", "Total Funds Raised ($)"),
+    align = "r",
+    title = "Total Funds Raised per Party"
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")
+```
+
+Of course in comparison to the major parties, Independent and Green parties are almost non-existent.
+
+```{r}
+party_colors <- c("Democrat" = "blue", 
+                  "Republican" = "red", 
+                  "Green" = "green", 
+                  "Independent" = "purple")
+
+party_bars <- pcf %>%
+    group_by(party) %>%
+    summarise(total = sum(contb_receipt_amt)) %>%
+    mutate(tip = str_c("$", prettyNum(total, big.mark = ","))) %>%
+    ggplot(aes(x = fct_relevel(party, "Democrat", "Republican", "Independent"), 
+               y = total / 1e6, fill = party)) +
+    geom_bar_interactive(aes(tooltip = tip, data_id = party), stat = "identity") +
+    scale_y_continuous("Total Funds Raised (Million $)",
+                       breaks = seq(0, 16, by = 2),
+                       labels = scales::dollar) +
+    scale_x_discrete("Party") +
+    labs(title = "Contributions to Democratic candidates far exceeded \nthose to Republicans") +
+    theme(legend.position = "none") +
+    scale_fill_manual(values = scales::muted(party_colors))
+
+tooltip_css <- "background-color:gray;color:white;padding:5px;border-radius:5px;font-family:sans-serif;font-size:12px;"
+
+ggiraph(code = print(party_bars),
+        hover_css = "cursor:pointer;stroke-width:5px;fill-opacity:0.8;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+```{r include=FALSE}
+clinton_sum <- pcf %>%
+    group_by(cand_last, party) %>%
+    summarise(total = sum(contb_receipt_amt)) %>%
+    filter(cand_last == "Clinton") %>%
+    pull(total)
+
+non_clinton_sum <- pcf %>%
+    group_by(cand_last, party) %>%
+    summarise(total = sum(contb_receipt_amt)) %>%
+    filter(cand_last != "Clinton") %>%
+    ungroup() %>%
+    summarise(total = sum(total)) %>%
+    pull(total)
+```
+
+The party variable is an aggregation of individual candidates so what we really want to examine is the candidates themselves. Clinton dominated the field. She raised over $`r format(round(clinton_sum / 1e6, 1), big.mark = ",")`m, while the rest of the field combined raised only \$ `r format(round(non_clinton_sum / 1e6, 1), big.mark = ",")`m. We can first see the raw disparity in a table.
+
+```{r}
+candidates <- pcf %>%
+    group_by(cand_last) %>%
+    summarise(
+        n_contributions = n(),
+        distinct_contributors = n_distinct(contbr_nm),
+        total_funds = sum(contb_receipt_amt)
+        ) %>%
+    mutate(funds_rank = min_rank(desc(total_funds))) %>%
+    arrange(desc(total_funds))
+
+datatable(candidates, rownames = FALSE, options = list(pageLength = 8),
+          colnames = c("Candidate", "No. Contributions", "No. Contributors", "Total Funds ($)", "Total Funds Rank")) %>%
+    formatRound(c("n_contributions", "distinct_contributors"), digits = 0,
+                mark = ",") %>%
+    formatRound("total_funds", digits = 2,
+                mark = ",")
+```
+
+We can also see Clinton's advantage, both in the amount of money raised and in the relative paucity of Democratic challengers compared to the much wider Republican field.
+
+```{r}
+pcf %>%
+    group_by(cand_last, party) %>%
+    summarise(total = sum(contb_receipt_amt) / 1e6) %>%
+    filter(party %in% c("Democrat","Republican")) %>%
+    ggCLE(aes(x = total, y = cand_last, color = party, facet = party)) +
+    scale_x_continuous("Total Funds ($ Million)",
+                       breaks = seq(0, 14, by = 2)) +
+    scale_color_manual(values = scales::muted(party_colors)) +
+    labs(title = "Clinton raised more than all other candidates combined in PA",
+         subtitle = "Trump faced more challengers to the nomination than Clinton",
+         caption = "Note: Green and Independent candidates not shown")
+```
+
+We might also like to visualize the aggregate funds by candidate in a waffle plot, where each square represents \$250,000 (and each column equals \$1m). Note that the necessary rounding to make each square conceals actual values, but it is easier to discern that Clinton raised about \$13m, Trump about \$4m, and Sanders about \$2.5m.
+
+```{r}
+cand_totals <- pcf %>%
+    group_by(cand_last) %>%
+    summarize(cand_total = sum(contb_receipt_amt))
+
+others <- cand_totals %>%
+    mutate(squares = round(cand_total / 250000)) %>%
+    filter(squares < 1) %>%
+    summarize(cand_last = "12 Others Combined",
+              cand_total = sum(cand_total),
+              squares = round(cand_total / 250000))
+
+waffle_df <- cand_totals %>%
+    mutate(squares = round(cand_total / 250000)) %>%
+    filter(squares >= 1) %>%
+    arrange(desc(squares)) %>%
+    bind_rows(others)
+
+waffle_vector <- waffle_df$squares
+names(waffle_vector) <- waffle_df$cand_last
+my_cols <- c(brewer.pal(n = 12, name = "Set3"), "grey50")
+
+waffle(
+    waffle_vector, rows = 4, colors = my_cols, legend_pos = "bottom",
+    title = "Total Contributions to Candidates in PA", xlab = "1 square = $250,000"
+)
+```
+
+## The Distribution of Contributions across Candidates
+
+Clinton has a clear aggregate advantage in fundraising, but we can also examine the distribution in order to describe a typical contribution. We should be able to answer, for instance, if a candidate mostly receives many small donations or fewer large ones.
+
+Given that a only few candidates heavily dominate parties, I will just focus on the top candidates. Good options to visualize these distributions include boxplots, density plots and violin plots. Because our data is so heavily skewed, "zooming" in on contributions just below $200 is the best way to see the difference in the range of contribution where the bulk of the data lies.
+
+From the boxplots below, it appears that Clinton has the lowest median contribution (nearly the same as Sanders) and seems considerably lower than Trump. However, this is misleading, as will be made clear below.
+
+```{r}
+front_runners <- c("Clinton","Trump","Sanders","Cruz")
+
+fr_counts <- pcf %>%
+    filter(cand_last %in% front_runners) %>%
+    group_by(cand_last) %>%
+    summarize(n = n()) %>%
+    mutate(n = format(n, big.mark = ",")) %>%
+    arrange(desc(n))
+
+my_xlab <- str_c(fr_counts$cand_last, "\n(N=", fr_counts$n, ")")
+
+pcf %>%
+    filter(cand_last %in% front_runners) %>%
+    ggplot(aes(x = fct_reorder(cand_last, contb_receipt_amt, median), 
+               y = contb_receipt_amt, fill = party)) +
+    geom_boxplot(varwidth = TRUE, alpha = 0.4) +
+    coord_cartesian(ylim = c(0,200)) +
+    scale_fill_manual(values = party_colors) +
+    theme(legend.position = "none") +
+    scale_x_discrete(NULL, labels = my_xlab) +
+    scale_y_continuous("Individual Contributions ($)", labels = scales::dollar) +
+    labs(title = "Clinton has the lowest median contribution of any leading candidate",
+         subtitle = "Sanders has the lowest 25% quantile")
+```
+
+An unweighted violin plot is another method to highlight the shape of a distribution. We can see bumps at typical donation amounts-- \$25, \$50, \$100. More than any other candidate, Sanders received support in small amounts, as reflected in his Q1 of the boxplot above.
+
+```{r}
+pcf %>%
+    filter(cand_last %in% front_runners) %>%
+    ggplot(aes(x = fct_reorder(cand_last, contb_receipt_amt, median), 
+               y = contb_receipt_amt, fill = party)) +
+    geom_violin(alpha = 0.4) +
+    coord_cartesian(ylim = c(0,200)) +
+    scale_fill_manual(values = party_colors) +
+    theme(legend.position = "none") +
+    scale_x_discrete(NULL, labels = my_xlab) +
+    scale_y_continuous("Individual Contributions ($)", labels = scales::dollar) +
+    labs(x = "", title = "Violin plots highlight distribution of contributions to each candidate")
+```
+
+One problem though with the above box and violin plots is that we have treated each contribution individually, which hides the fact that individuals are able to donate more than once. Perhaps more interesting than a typical Trump or Clinton contribution is a typical Trump or Clinton contributor. If a contributor donates \$5 one hundred times, for most questions, it would be preferable to represent that contributor as \$500, which can be achieved by grouping. This grouping may not be entirely perfect because there are some small errors in the name list where a `contbr_nm` of a single person is spelled just slightly different, but nevertheless it achieves its purpose.
+
+Having done this grouping, the table below shows an interesting result. Despite Clinton having far more instances of contributions in the dataset, Trump actually had more unique contributors. The percentage of instances of contributions coming from a unique contributor differs widely between Trump and the other leading candidates, including Clinton.
+
+```{r}
+pcf_contrbr <- pcf %>%
+    filter(cand_last %in% front_runners) %>%
+    group_by(cand_last) %>%
+    summarize(
+        unique_contributors = n_distinct(contbr_nm),
+        contributions = n(),
+        percent_distinct = unique_contributors / contributions
+        ) %>%
+    arrange(-unique_contributors)
+
+kable(
+    pcf_contrbr,
+    format.args = list(big.mark = ","),
+    digits = 3,
+    title = "Contributors and Contributions for Leading Candidates",
+    col.names = c("Candidate", "No. Unique Contributors", "No. Contributions", "Percent of Contributions from Unique Contributors")
+) %>%
+    kable_styling(full_width = FALSE, bootstrap_options = c("striped", "condensed"), position = "left")   
+```
+
+After grouping by individual contributors (instead of contributions), we get a very different picture. Of any candidate, Trump had by far the smallest median distinct contributor total. The grassroots Sanders was second. Clinton's was the highest.
+
+```{r}
+fr_unique_counts <- pcf_contrbr %>%
+    select(cand_last, unique_contributors) %>%
+    mutate(unique_contributors = format(unique_contributors, big.mark = ",")) %>%
+    mutate(order = c(4,1,3,2)) %>%
+    arrange(order)
+
+my_xlab2 <- str_c(fr_unique_counts$cand_last, "\n(N=",
+                 fr_unique_counts$unique_contributors, ")")
+    
+pcf_unique <- pcf %>%
+    filter(cand_last %in% front_runners) %>%
+    group_by(contbr_nm, cand_last, party) %>%
+    summarize(total = sum(contb_receipt_amt))
+
+pcf_unique %>%    
+    ggplot(aes(x = cand_last, y = total, fill = party)) +
+    geom_boxplot(varwidth = TRUE, alpha = 0.4) +
+    coord_cartesian(ylim = c(0, 1000)) +
+    scale_fill_manual(values = party_colors) +
+    theme(legend.position = "none") +
+    scale_x_discrete(NULL, labels = my_xlab2) +
+    scale_y_continuous("Total Contributions from a Single Contributor", 
+                       labels = scales::dollar) +
+    labs(title = "Trump has the lowest median unique contributor value", 
+         subtitle = "Clinton had the lowest median contribution, but has the highest median contributor when \ngrouped by distinct contributors")
+```
+
+One last way to see this discrepancy would be to hold each unique contributor to only one donation. We can filter the data to retain only the single largest donation from each unique contributor. Clinton still leads in aggregate funds received, but the amount of funds removed from repeat donors is considerably more than other candidates, especially Trump.
+
+```{r}
+pcf_singular <- pcf %>%
+    filter(cand_last %in% front_runners) %>%
+    group_by(contbr_nm) %>%
+    mutate(r = min_rank(desc(contb_receipt_amt))) %>%
+    filter(r == 1) %>%
+    mutate(r2 = row_number()) %>%
+    filter(r2 == 1) %>%
+    group_by(cand_last, party) %>%
+    summarise(singular = sum(contb_receipt_amt)) 
+
+pcf_unique %>%
+    group_by(cand_last) %>%
+    summarize(total = sum(total)) %>%
+    left_join(pcf_singular, by = "cand_last") %>%
+    ggplot(aes(x = fct_reorder(cand_last, total))) +
+    geom_bar(aes(y = total / 1e6), stat = "identity", alpha = 0.8) +
+    geom_bar(aes(y = singular / 1e6, fill = party), stat = "identity", alpha = 0.8) +
+    scale_y_continuous("Total Contributions (Million $)", 
+                       labels = scales::dollar, breaks = seq(0, 12, by = 2)) +
+    scale_x_discrete(NULL) +
+    scale_fill_manual(values = scales::muted(party_colors)) +
+    coord_flip() +
+    theme(legend.position = "none") +
+    labs(title = "Comparing Total Funds vs. Sum of Single Largest Contribution per Individual",
+         subtitle = "Clinton still leads, but her reduction is far greater than that of Trump")
+```
+
+While interesting, the plot above ignores a lot of perfectly valid contributions. To really show the discrepancy generated between grouping by contributions and grouping by contributors, I will focus only on the two general candidates, Clinton and Trump. In the plot below, it is easier to see how whether considering individual contributions or individual contributors makes all the difference in determining how to portray the distribution of a candidate's fundraising profile.
+
+```{r}
+p1 <- pcf %>%
+    filter(cand_last %in% c("Clinton", "Trump")) %>%
+    ggplot(aes(x = cand_last, y = contb_receipt_amt, fill = party)) +
+    geom_boxplot(varwidth = TRUE, alpha = 0.4) +
+    scale_fill_manual(values = party_colors) +
+    theme(legend.position = "none") +
+    scale_y_continuous(NULL) +
+    scale_x_discrete("One Contribution, One Observation") +
+    theme(axis.title.y = element_text(size = 8, face = "italic")) +
+    coord_flip(ylim = c(0,800))
+
+p2 <- pcf_unique %>%  
+    filter(cand_last %in% c("Clinton", "Trump")) %>%
+    ggplot(aes(x = cand_last, y = total, fill = party)) +
+    geom_boxplot(varwidth = TRUE, alpha = 0.4) +
+    scale_fill_manual(values = party_colors) +
+    scale_x_discrete("One Individual, One Observation") +
+    scale_y_continuous("Contribution Amount ($)") +
+    theme(legend.position = "none") +
+    theme(axis.title.y = element_text(size = 8, face = "italic")) +
+    coord_flip(ylim = c(0, 800))
+
+plot_title <- grid::textGrob(
+    "Distribution of Clinton and Trump Fundraising,\nGrouped by Unique Contribution (top) and Contribution (bottom)", gp = grid::gpar(fontface = "bold", fontsize = 15))
+grid.arrange(p1, p2, ncol = 1, top = plot_title)
+```
+
+## Daily Candidate Totals
+
+In addition to knowing the aggregate totals for each candidate, and understanding the increments in which it was received by examining the respective distributions, we can also examine the strength of a campaign at a particular date in time. For many questions, more important than who gave the contribution is just how much the candidate received, and on what date. We can create such a dataset with the information we have. This will let us track a candidate's progress in fundraising over time.
+
+```{r}
+cand_sums <- pcf %>%
+    group_by(cand_last, party, contb_receipt_dt) %>%
+    summarize(daily_total = sum(contb_receipt_amt)) %>%
+    arrange(cand_last, contb_receipt_dt) %>%
+    mutate(cum_total = cumsum(daily_total),
+           cum_total_m = cum_total / 1e6)
+```
+
+From the plot below, we can see how early Clinton accumulated her large aggregate advantage over the rest of the field. The growth in Trump's support, on the other hand, breaks very late, mostly after Clinton has already secured her nomination and not long before his own nomination was sealed. The lines of most other Republican candidates stop before Trump's surge even begins. This could suggest preference for other Republican candidates in Pennsylvania, or just a reflection of Trump's "self-funding" campaign style.
+
+```{r}
+ym_breaks <- seq(floor_date(min(pcf$contb_receipt_dt),unit = "2 months"), 
+                 ceiling_date(max(pcf$contb_receipt_dt), unit = "2 months"), by = "2 months")
+
+last_dates <- cand_sums %>%
+    group_by(cand_last) %>%
+    filter(contb_receipt_dt == max(contb_receipt_dt)) %>%
+    filter(cand_last %in% front_runners)
+
+cand_sums %>%
+    ggplot(aes(x = contb_receipt_dt, y = cum_total_m, 
+               color = cand_last, label = cand_last)) +
+    geom_line(size = 0.5) +
+    geom_point(data = last_dates) +
+    ggrepel::geom_text_repel(data = last_dates, aes(label = cand_last),
+                             nudge_x = 5) +
+    coord_cartesian(xlim = c(as.Date("2015-05-01"), max(pcf$contb_receipt_dt))) +
+    theme(legend.position = "none") +
+    scale_y_continuous("Cumulative Funds Raised (Million $)",
+                       breaks = seq(0, 12, by = 2),
+                       labels = scales::dollar) +
+    scale_x_date(NULL, breaks = ym_breaks, date_labels = "%m-%y") +
+    geom_vline(xintercept = as.Date("2016-06-07"), alpha = 0.5, linetype = 3) +
+    geom_vline(xintercept = as.Date("2016-07-20"), alpha = 0.5, linetype = 3) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title = "Clinton outraises all by a huge margin in PA", 
+         subtitle = "Trump's growth begins not long before nomination sealed") +
+    annotate("text", x = as.Date("2016-07-01"), y = 10, size = 3,
+             label = "Dates Clinton, \n then Trump \n secure party \n nomination")
+```
+
+## Contributions by Zip Code
+
+The last few steps to our analysis have a geographic focus. It is well known that political support varies widely by geography, commonly along urban and rural divides. Our dataset has the zip code of each contribution so that will be our starting point.
+
+First, we have to remove a few errors in our data-- zip codes clearly not from PA. One way to get this data would be from the `zipcode` package. However, we also need to be able to link zip codes with counties. I found a record of this data [here](https://www.unitedstateszipcodes.org/zip-code-database/) at unitedstateszipcodes.org. After downloading the free version, I joined latitude, longitude and county names to a data frame of contributions summed per zip code. Considering that a zip code represents such a small area, it can be difficult to visualize. However, we can get a sense of the geographic disparity if we redundantly map contribution totals to point size, color, and alpha shading. Enable the zoom function below, particularly in the Philadelphia region, to see the concentration of financing.
+
+```{r message=FALSE}
+# get zips, counties, coordinates
+zip_code_database <- read_csv("zip_code_database.csv")
+zip_county <- zip_code_database %>%
+    filter(state == "PA") %>%
+    filter(zip != "15439") %>% # remove 1 error zip in West Virginia
+    separate(county, c("county", "etc")) %>%
+    select(zip, county, latitude, longitude, primary_city) %>%
+    mutate(county = str_to_lower(county))
+
+# get contribution totals per party per zip
+zip_totals <- pcf %>%
+    group_by(contbr_zip5, party) %>%
+    summarise(total = sum(contb_receipt_amt)) %>%
+    spread(party, total) %>%
+    mutate(total = sum(Democrat, Republican, Green, Independent, na.rm = TRUE)) %>%
+        select(-Green, -Independent)
+
+# join geographic and contribution zip data
+zip_map <- zip_county %>%
+    left_join(zip_totals, by = c("zip" = "contbr_zip5")) %>%
+    filter(!is.na(total)) %>%
+    mutate(
+        z_total = prettyNum(total, big.mark = ","),
+        tooltip_zip = str_c(
+        "<b>", zip, " (", primary_city, ")", "</b>",
+        "<br>Total: $", z_total, "</b>",
+        "</span></div>"
+    ))
+
+zip_plot <- ggplot() +
+    geom_point_interactive(
+        data = zip_map, 
+        aes(x = longitude, y = latitude, color = total, size = total, alpha = total,
+               tooltip = tooltip_zip, data_id = zip)
+        ) +
+    geom_polygon(
+        data = filter(map_data("county"), region == "pennsylvania"),
+        aes(x = long, y = lat, group = group),
+        col = "grey50", fill = NA, size = 0.1) +
+    scale_color_viridis(labels = scales::comma) +
+    scale_size_continuous(labels = scales::comma) +
+    scale_alpha_continuous(labels = scales::comma) +
+    coord_map() +
+    theme_nothing(legend = TRUE) +
+    labs(title = "PA Map of Political Contributions by Zip Code", 
+       subtitle = "Total contributions from each zip code mapped to color, size, and alpha shading",
+       color = "Total ($)", size = "Total ($)", alpha = "Total ($)")
+
+ggiraph(code = print(zip_plot), zoom_max = 30,
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+The map highlights the concentration of contributions around Philadelphia and Pittsburgh. A simple table though perhaps does a better job of communicating the magnitude of the disparity between zip codes. Below we can see that one single zip code in downtown Philadelphia contributed over \$900,000, more than double the next highest zip code. 
+
+```{r}
+datatable(
+    zip_map %>%
+        select(zip, primary_city, county, Democrat, Republican, total) %>%
+        mutate(county = str_to_title(county),
+               zip_rank = min_rank(desc(total))) %>%
+        arrange(desc(total)),
+    rownames = FALSE, options = list(pageLength = 8),
+    colnames = c("Zip", "Primary City", "County", "Democrat Funds ($)", "Republican Funds ($)", "Total Funds ($)", "Total Funds Rank"),
+    caption = "Note: 'Total Funds' include Green and Independent contributions"
+) %>%
+    formatRound(c("Democrat", "Republican", "total"), digits = 2,
+                mark = ",")
+```
+
+## Contributions by County
+
+For some purposes, zip code is too small of a geographic unit to communicate clear trends. We can aggregate zip codes into counties. Before looking at county totals by party however, we should first observe the disparity in total contributions. If we fill the county map by total contributions, we can see that the majority of contributions come from a few counties surrounding the two major metropolitan areas, Philadelphia and Pittsburgh. Mouse over the county for exact figures.
+
+```{r}
+# get party funds by county
+party_funds_by_county <- pcf %>%
+    filter(contbr_zip5 %in% zip_county$zip) %>%
+    filter(party %in% c("Democrat", "Republican")) %>%
+    left_join(zip_county, by = c("contbr_zip5" = "zip")) %>%
+    group_by(county, party) %>%
+    summarize(county_total = sum(contb_receipt_amt)) %>%
+    spread(party, county_total) %>%
+    mutate(
+        total = Democrat + Republican,
+        percent_d = Democrat / total,
+        percent_r = Republican / total
+        ) %>%
+    ungroup()
+
+# join party fund data with geographic data, plus tooltip
+pa_map <- map_data("county") %>%
+    filter(region == "pennsylvania") %>%
+    left_join(party_funds_by_county, by = c("subregion" = "county")) %>%
+    mutate(subregion = str_to_title(subregion),
+           d_money = str_c("$", prettyNum(Democrat, big.mark = ",")),
+           r_money = str_c("$", prettyNum(Republican, big.mark = ",")),
+           t_money = str_c("$", prettyNum(total, big.mark = ",")),
+           tooltip_total = str_c(
+               "<b>", subregion, "</b>",
+                "<br>Total: ", t_money, "</b>",
+                "</span></div>"
+           )
+    )
+
+total_map <- pa_map %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = total)) +
+    geom_polygon_interactive(aes(tooltip = tooltip_total, data_id = subregion), 
+                             col = "grey50") +
+    coord_map() +
+    scale_fill_viridis("Contributions ($)", labels = scales::comma) +
+    scale_x_continuous(NULL, labels = NULL) +
+    scale_y_continuous(NULL, labels = NULL) +
+    theme_nothing(legend = TRUE) +
+    labs(title = "PA county map filled by total political contributions") +
+    theme(legend.title = element_text(size = 10))
+
+ggiraph(code = print(total_map), 
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+This of course though should not be too surprising as it closely mirrors the population that the map represents. We could get county population data from a number of places, but I have chosen to scrape the latest census data from pennsylvania-demographics.com. The original population data can be found [here](https://www.pennsylvania-demographics.com/counties_by_population).
+
+```{r}
+# scrape and format county population data
+url <- "https://www.pennsylvania-demographics.com/counties_by_population"
+county_pops <- read_html(url) %>%
+    html_nodes("td~ td") %>%
+    html_text() %>%
+    str_trim() %>%
+    matrix(., ncol = 2, byrow = TRUE) %>%
+    as_tibble() %>%
+    rename(county = V1, population = V2) %>%
+    separate(county, into = c("county", "etc"), sep = " ") %>%
+    select(-etc) %>%
+    mutate(county = str_to_lower(county),
+           population = parse_number(population)) 
+
+# then join with pa map data
+pa_map_pop <- map_data("county") %>%
+    filter(region == "pennsylvania") %>%
+    left_join(county_pops, by = c("subregion" = "county")) %>%
+    mutate(pop = prettyNum(population, big.mark = ","),
+           subregion = str_to_title(subregion),
+           tooltip_pop = str_c(
+               "<b>", subregion, "</b>",
+                "<br>Population (2017)", 
+                "<br>", pop,
+                "</span></div>"
+           )
+    )       
+
+pop_map <- pa_map_pop %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = population)) +
+    geom_polygon_interactive(aes(tooltip = tooltip_pop, data_id = subregion), 
+                             col = "grey50") +
+    coord_map() +
+    scale_fill_viridis("Population", labels = scales::comma) +
+    scale_x_continuous(NULL, labels = NULL) +
+    scale_y_continuous(NULL, labels = NULL) +
+    theme_nothing(legend = TRUE) +
+    labs(title = "PA county map filled by population (2017)") +
+    theme(legend.title = element_text(size = 10))
+
+ggiraph(code = print(pop_map), 
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+Now we can explore the political direction towards which these contributions were directed in each county. We could group contributions by any candidate but it makes the most sense to group by Democrat vs. Republican donations, and then fill with opposing party colors. As shown in the map below, the Philadelphia and Pittsburgh metro areas, Lackawanna county (the Scranton metro area), and Centre (home to State College) posted large Democratic advantages in fundraising. Many other counties, particularly on the eastern border, witnessed only slight Democratic advantages.
+
+```{r}
+county_map <- pa_map %>%
+    mutate(
+        tooltip_dr = str_c(
+            "<b>", subregion, "</b>",
+            "<br>Dem Total: ", d_money, "</b>",
+            "<br>Repub Total: ", r_money, "</b>",
+            "</span></div>"
+        )
+    ) %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = percent_d)) +
+    geom_polygon_interactive(aes(tooltip = tooltip_dr, data_id = subregion), 
+                             col = "grey50") +
+    coord_map() +
+    scale_fill_gradient2("% Funds Dem", low = scales::muted("red"), 
+                         mid = "white", midpoint = 0.5, high = scales::muted("blue"), 
+                         limits = c(0, 1)) +
+    scale_x_continuous(NULL, labels = NULL) +
+    scale_y_continuous(NULL, labels = NULL) +
+    theme_nothing(legend = TRUE) +
+    labs(title = "PA county map depicting percentage of contributions flowing to \nDemocrat or Republican candidates",
+         subtitle = "Counties shaded blue for Democrats, red for Republicans, according to color intensity")
+
+ggiraph(code = print(county_map), 
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+The map is very useful for seeing regional trends, but it can be difficult to grasp finer differences between counties. A dumbbell plot is a useful tool depicting contributions to both Democratic and Republican candidates for each county. It shows the wide gap in larger counties, like Philadelphia, between Democrat and Republican sums. At the same time, it shows the extent to which these few counties account for most of the state's political contributions. Allegheny County, for instance, accounted for the largest Republican total of any county, but this amount still fell far short of its Democratic contributions. Most small counties have slight Republican edges in fundraising. Mouse over the lines for exact figures.
+
+```{r}
+funds_split <- party_funds_by_county %>%
+    arrange(desc(total)) %>%
+    mutate(
+        d_chr = prettyNum(Democrat, big.mark = ","),
+        r_chr = prettyNum(Republican, big.mark = ",")
+    ) %>%
+    select(-percent_d, -percent_r) %>%
+    gather(party, funds, -county, -total, -d_chr, -r_chr) %>%
+    mutate(county = str_to_title(county),
+           tooltip_dr = str_c(
+               "<b>", county, "</b>",
+                "<br>Dem Funds: $", d_chr,
+                "<br>Rep Funds: $", r_chr,
+          "</span></div>"
+           )) %>%
+    ggplot(aes(x = funds / 1e6, 
+               y = fct_reorder(county, total),
+               tooltip = tooltip_dr, data_id = county)) +
+    geom_point(aes(color = party)) +
+    geom_line_interactive(size = 0.75) +
+    scale_color_manual(values = party_colors) +
+    theme(legend.position = "none") +
+    scale_x_continuous("Contributions to Democratic (blue) or Republican (red) candidates ($ Million)") +
+    scale_y_discrete(NULL) +
+    labs(title = "Contributions to Democrat and Republican candidates per County") +
+    theme(plot.title = element_text(size = 12))
+
+ggiraph(code = print(funds_split),
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75,
+        height_svg = 7.1)
+```
+
+## Comparing Political Contributions to Vote Totals 
+
+Ultimately, campaigns are about votes. We should expect to find a relationship between political contributions and vote totals. Namely, we would expect that greater contributions to a party (or a candidate) from a certain area suggests greater political support for that party, and therefore that support will translate into a greater number of votes. We can test the extent to which this plausible relationship holds in this case by comparing the campaign finance data to the election results.
+
+I scraped the election data from the New York Times, available [here](https://www.nytimes.com/elections/results/pennsylvania). As the plot below shows, despite a large fundraising advantage, Clinton narrowly lost the election in Pennsylvania, and all of its 20 electoral college votes, to Trump by fewer than 50,000 votes.
+
+```{r include=FALSE}
+# count counties by party fund total
+party_funds_by_county %>%
+    mutate(more_funds = ifelse(Democrat > Republican, "Democrat", "Republican")) %>%
+    count(more_funds)
+
+# scrape election data from nyt
+url <- "https://www.nytimes.com/elections/results/pennsylvania"
+county_list <- read_html(url) %>%
+    html_nodes(".eln-name") %>%
+    html_text() %>%
+    str_trim() %>%
+    .[14:80] %>%
+    str_to_lower()
+
+county_votes <- read_html(url) %>%
+    html_nodes(".eln-vote-count") %>%
+    html_text() %>%
+    str_trim() %>%
+    matrix(., ncol = 2, byrow = TRUE) %>%
+    as_tibble() %>%
+    head(67) %>%
+    rename(Trump = V1, Clinton = V2) %>%
+    mutate(
+        county = county_list,
+        Trump = parse_number(Trump),
+        Clinton = parse_number(Clinton)
+        )
+
+county_results <- party_funds_by_county %>%
+    left_join(county_votes, by = "county") %>%
+    select(-total, -percent_d, -percent_r) %>%
+    #mutate(county = str_to_title(county)) %>%
+    mutate(
+        winner = ifelse(Trump > Clinton, "Trump", "Clinton"),
+        outcome = case_when(
+            Democrat > Republican & winner == "Clinton" ~ "Expected",
+            Republican > Democrat & winner == "Trump" ~ "Expected",
+            Democrat > Republican & winner == "Trump" ~ "Trump surprises",
+            Republican > Democrat & winner == "Clinton" ~ "Clinton surprises"
+        )
+    )
+
+# count outcomes comparing funds and votes
+county_results %>%
+    count(outcome)
+```
+
+```{r}
+# get summary totals
+totals <- county_results %>%
+    summarize(Democrat = sum(Democrat) / 1e6,
+              Republican = sum(Republican) / 1e6,
+              Clinton = sum(Clinton) / 1e6,
+              Trump = sum(Trump) / 1e6)
+
+plot_title <- grid::textGrob(
+    "Democrats outraise Republicans in PA by a wide margin (top), \nbut Clinton narrowly loses vote to Trump (bottom)", gp = grid::gpar(fontface = "bold", fontsize = 15))
+
+grid.arrange(
+    totals %>%
+        select(Democrat, Republican) %>%
+        gather(party, funds) %>%
+        ggplot(aes(x = party, y = funds, fill = party)) +
+        geom_col() +
+        scale_x_discrete(NULL) +
+        scale_y_continuous("Total Funds Raised ($ Million)", labels = scales::comma) +
+        scale_fill_manual(values = scales::muted(party_colors)) +
+        theme(legend.position = "none") +
+        coord_flip(),
+    totals %>%
+        select(Clinton, Trump) %>%
+        gather(candidate, votes) %>%
+        ggplot(aes(x = candidate, y = votes, fill = candidate)) +
+        geom_col() +
+        scale_x_discrete(NULL) +
+        scale_y_continuous("Vote Count (Million)", labels = scales::comma) +
+        scale_fill_manual(
+            values = scales::muted(c("Trump" = "red", "Clinton" = "blue"))) +
+        theme(legend.position = "none") +
+        coord_flip(),
+    ncol = 1,
+    top = plot_title
+)    
+```
+
+While there is no prize for winning the number of votes in a given county, examining vote counts by county is an interesting way to analyze voting patterns across the state, which we can then compare to our county map of political contributions. 
+
+Not surprisingly, there are a number of similarities between the electoral map and the campaign finance map. The strongest Democratic fundraiser, Philadelphia, voted heavily for Clinton. Several other counties, such as Allegheny, Centre or Lackawanna, that had strong Democratic fundraising advantages, saw narrow Clinton edges in their vote counts. Most other counties voted more heavily for Trump.
+
+```{r}
+# join vote and map data
+election_map <- map_data("county") %>%
+    filter(region == "pennsylvania") %>%
+    left_join(county_results, by = c("subregion" = "county")) %>%
+    mutate(
+        Clinton2 = prettyNum(Clinton, big.mark = ","),
+        Trump2 = prettyNum(Trump, big.mark = ","),
+        subregion = str_to_title(subregion),
+        tooltip_vote = str_c(
+            "<b>", subregion, "</b>",
+            "<br>Clinton: ", Clinton2, "</b>",
+            "<br>Trump: ", Trump2, "</b>",
+            "</span></div>"
+        )
+    ) %>%
+    ggplot(aes(x = long, y = lat, group = group, 
+               fill = Clinton/(Clinton + Trump))) +
+    geom_polygon_interactive(aes(tooltip = tooltip_vote, data_id = subregion), 
+                             col = "grey50") +
+    coord_map() +
+    scale_fill_gradient2("% Clinton", low = scales::muted("red"), 
+                         mid = "white", midpoint = 0.5, high = scales::muted("blue")) +
+    scale_x_continuous(NULL, labels = NULL) +
+    scale_y_continuous(NULL, labels = NULL) +
+    theme_nothing(legend = TRUE) +
+    labs(title = "PA county map depicting Clinton-Trump vote split",
+         subtitle = "Counties shaded blue for Clinton, red for Trump, according to color intensity")
+
+ggiraph(code = print(election_map), 
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+Instead of a map, we might prefer to view these vote totals more directly in a plot. We can produce another dumbbell plot similar to the previous one mapping contributions, but now replaced with votes for Clinton (blue) and Trump (red). We get a similar pattern. The largest counties voted for Clinton by wide margins, while the smaller counties voted more heavily for Trump.
+
+```{r}
+vote_split <- county_results %>%
+    mutate(total_votes = Trump + Clinton) %>%
+    arrange(desc(total_votes)) %>%
+    mutate(
+        Trump_chr = prettyNum(Trump, big.mark = ","),
+        Clinton_chr = prettyNum(Clinton, big.mark = ",")
+    ) %>%
+    select(-Democrat, -Republican, -winner, -outcome) %>%
+    gather(candidate, votes, -county, -total_votes, -Trump_chr, -Clinton_chr) %>%
+    mutate(county = str_to_title(county),
+           tooltip_ct = str_c(
+               "<b>", county, "</b>",
+                "<br>Clinton Votes: ", Clinton_chr,
+                "<br>Trump Votes: ", Trump_chr,
+          "</span></div>"
+           )) %>%
+    ggplot(aes(x = votes / 1e5, 
+               y = fct_reorder(county, total_votes),
+               tooltip = tooltip_ct, data_id = county)) +
+    geom_point(aes(color = candidate)) +
+    geom_line_interactive(size = 0.75) +
+    scale_color_manual(values = c("Trump" = "red", "Clinton" = "blue")) +
+    theme(legend.position = "none") +
+    scale_x_continuous("Votes (100k)", breaks = seq(0, 6, by = 2)) +
+    scale_y_discrete(NULL) +
+    labs(title = "Clinton (blue) and Trump (red) Votes per County")
+
+ggiraph(code = print(vote_split),
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75,
+        height_svg = 7.2)
+```
+
+Now we can identify counties where expectations were not met given what we know about their political contributions and election votes. From our campaign finance data, we saw that Democrats outraised Republicans in 26 of 67 counties (they tend to win fewer, more populous counties). In the election though, Clinton received more votes than Trump in only 11 counties. Comparing campaign finance data and actual votes, we find that in 50 counties, the party raising the most funds also had the candidate with the most votes. 
+
+In 16 counties however, Democrats outraised Republicans, while at the same time Trump outperformed Clinton in terms of votes. The reverse was true in only one county, Lehigh, where Clinton outperformed Trump in terms of votes despite Republicans outraising Democrats. We can compare these totals in the table below. Note that "Expected" in the Outcome column only means that the party raising the most money in that county also received the most votes.
+
+```{r}
+datatable(
+    county_results %>% mutate(county = str_to_title(county)), 
+    rownames = FALSE,
+    colnames = c("County", "D Funds ($)", "R Funds ($)", "Trump Votes", "Clinton Votes", "Vote Winner", "Outcome")
+) %>%
+    formatRound(c("Democrat", "Republican"), digits = 2, mark = ",") %>%
+    formatRound(c("Trump", "Clinton"), digits = 0, mark = ",") 
+```
+
+We can also highlight counties which reverse expectations of the earlier campaign funds map. Luzerne and Wayne are two good examples of this reversal. In Luzerne County, Democrats outraised Republicans by nearly \$100,000, but Trump garnered about 25,000 more votes in the county. In the state's northeast corner of Wayne County, Democrats outraised Republicans by more than 2 to 1. Counting votes however, Trump had a more than 2 to 1 advantage over Clinton. Note that the dark blue county of Lackawanna in the state's northeast may appear to be outlined at first, but that is only due to its neighbors.
+
+```{r}
+# define vectors of "surprise" counties
+trump_surprises <- county_results %>%
+    filter(outcome == "Trump surprises") %>%
+    pull(county) %>%
+    str_to_lower() %>%
+    str_to_title()
+
+clinton_surprises <- county_results %>%
+    filter(outcome == "Clinton surprises") %>%
+    pull(county) %>%
+    str_to_lower() %>%
+    str_to_title()
+
+# join vote data to map data; add tooltip
+pa_map_votes <- pa_map %>%
+    mutate(subregion = str_to_lower(subregion)) %>%
+    left_join(
+        select(county_results, county, Trump, Clinton), 
+        by = c("subregion" = "county")) %>%
+    mutate(
+        subregion = str_to_title(subregion),
+        Trump = prettyNum(Trump, big.mark = ","),
+        Clinton = prettyNum(Clinton, big.mark = ","),
+        tooltip_votes = str_c(
+          "<b>", subregion, "</b>",
+          "<br>Dem Funds: ", d_money, "; Repub Funds: ", r_money, "</b>",
+          "<br>Clinton Votes: ", Clinton, "; Trump Votes: ", Trump,"</b>",
+          "</span></div>"
+        )
+    )
+
+surprise_map <- pa_map_votes %>%
+    ggplot(aes(x = long, y = lat, group = group, fill = percent_d)) +
+    geom_polygon_interactive(aes(tooltip = tooltip_votes, data_id = subregion), 
+                             col = "grey50") +
+    geom_polygon_interactive(data = filter(pa_map_votes, 
+                                           subregion %in% trump_surprises),
+                             aes(tooltip = tooltip_votes, data_id = subregion),
+                 col = "red", size = 1.2, linetype = 5) +
+    geom_polygon_interactive(data = filter(pa_map_votes, 
+                                           subregion %in% clinton_surprises),
+                             aes(tooltip = tooltip_votes, data_id = subregion),
+                 col = "blue", size = 1.2, linetype = 5) +
+    coord_map() +
+    scale_fill_gradient2("% Funds Dem", low = scales::muted("red"), 
+                         mid = "white", midpoint = 0.5, high = scales::muted("blue"), 
+                         limits = c(0, 1)) +
+    scale_x_continuous(NULL, labels = NULL) +
+    scale_y_continuous(NULL, labels = NULL) +
+    theme_nothing(legend = TRUE) +
+    labs(title = "PA county map depicting percentage of contributions flowing to \nDemocrat or Republican candidates",
+         subtitle = "Counties outlined in red voted above 50% for Trump despite more Democrat funds; \nthose outlined in blue voted above 50% for Clinton despite more Republican funds")
+
+ggiraph(code = print(surprise_map), 
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
+```
+
+Setting our marker at the 50% threshold was a useful, but in many ways arbitrary decision given that electoral college votes are determined for the state as a whole. For a closer look at each county, we can compare the difference between a party's share in political contributions and a candidate's share of votes. We could do this for either party/candidate, but I will do it for Clinton. It can be read in reverse to know the performance of Trump. 
+
+As seen below, in nearly all counties, Clinton's vote share percentage (marked in green) is less than the share of political contributions for Democratic candidates (marked in orange). In some cases this difference is fairly minimal. In Philadelphia County, 90% of political contributions went to Democratic candidates, and 84% of votes went to Clinton. In other cases, the difference is substantial. In Montour County, for example, 84% of political contributions went to Democratic candidates, but just 35% of votes went to Clinton. There are just a few cases where Clinton's vote share exceeds the Democrats' share of political contributions, most of which involve very low percentages in heavily Republican areas. Only in Lehigh did Republicans outraise Democrats, but Clinton earned more than 50% of the vote.
+
+```{r}
+funds_votes <- county_results %>%
+    mutate(
+        d_funds = Democrat / (Democrat + Republican),
+        c_votes = Clinton / (Trump + Clinton)
+        ) %>%
+    select(-winner, -outcome) %>%
+    gather(funds_or_votes, percentage, -county, -Democrat, -Republican, -Trump, -Clinton) %>%
+    mutate(
+        county = str_to_title(county),
+        Democrat = prettyNum(Democrat, big.mark = ","),
+        Republican = prettyNum(Republican, big.mark = ","),
+        Clinton = prettyNum(Clinton, big.mark = ","),
+        Trump = prettyNum(Trump, big.mark = ","),
+        tooltip_fv = str_c(
+            "<b>", county, "</b>",
+            "<br>Dem Funds: $", Democrat, "; Repub Funds: $", Republican, "</b>",
+            "<br>Clinton Votes: ", Clinton, "; Trump Votes: ", Trump,"</b>",
+            "</span></div>"
+        )
+    ) %>%
+    ggplot(aes(x = percentage, y = fct_reorder(county, percentage),
+               tooltip = tooltip_fv, data_id = county)) +
+    geom_vline(xintercept = 0.5, size = 2, color = "white") +
+    geom_point(aes(color = funds_or_votes)) +
+    geom_line_interactive(size = 0.75) +
+    scale_y_discrete(NULL) +
+    scale_x_continuous("Percentage of Contributions to Democrats (orange) and Votes for Clinton (green)", breaks = seq(0,1, by = 0.1)) +
+    scale_color_brewer(type = "qual", palette = "Dark2") +
+    theme(legend.position = "none") +
+    labs(title = "Percentage of contributions to Democrats nearly always \nexceeds percentage of votes for Clinton") +
+    theme(axis.title.x = element_text(size = 8))
+
+ggiraph(code = print(funds_votes),
+        hover_css = "cursor:pointer;stroke-width:5px;",
+        tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75,
+        height_svg = 7.1)
+```
+
+# Conclusion
+
+This investigation has hopefully demonstrated the following key points:
+
+* Clinton amassed a massive aggregate fundraising advantage over all other candidates in Pennsylvania (roughly \$13m to \$4m for Trump and \$2.5m for Sanders).
+
+* Grouping by unique contributors instead of individual contributions reveals that repeat donors were crucial to Clinton's aggregate fundraising advantage. Despite raising far less money, most of which did not arrive until his party's nomination had been sealed, Trump actually had more unique contributors than Clinton.
+
+* One zip code in downtown Philadelphia contributed a total of \$900,000 (mostly to Democrats)-- more than double the next highest zip code.
+
+* Trump received more votes than Clinton in 16 counties in which Democrats outraised Repbublicans, while Clinton received more votes in only 1 county in which Republicans outraised Democrats.
+
+Future research in this area should look to investigate:
+
+* How does Pennsylvania fit into the larger national picture in 2016?
+
+* How does 2016 Pennsylvania compare to its performance in previous elections?
+
+* To what extent, if any, does the story presented here change when also considering super PAC contributions for each candidate?
