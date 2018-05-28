@@ -13,7 +13,7 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE, out.width = "70%", fig.align = "center")
 options(knitr.table.format = "html") 
 ```
 
@@ -850,8 +850,12 @@ datatable(
 
 ## Contributions by County
 
-For some purposes, zip code is too small of a geographic unit to communicate clear trends. We can aggregate zip codes into counties. Before looking at county totals by party however, we should first observe the disparity in total contributions. If we fill the county map by total contributions, we can see that the majority of contributions come from a few counties surrounding the two major metropolitan areas, Philadelphia and Pittsburgh. Mouse over the county for exact figures.
+For some purposes, zip code is too small of a geographic unit to communicate clear trends. We can aggregate zip codes into counties. Before looking at county totals by party however, we should first observe the disparity in total contributions. If we fill the county map by total contributions (the map on the left), we can see that the majority of contributions come from a few counties surrounding the two major metropolitan areas, Philadelphia and Pittsburgh. 
 
+This of course though should not be too surprising as it closely mirrors the population that the map represents (shown on the right). We could get county population data from a number of places, but I have chosen to scrape the latest census data from pennsylvania-demographics.com. The original population data can be found [here](https://www.pennsylvania-demographics.com/counties_by_population). Mouse over the county for exact figures.
+
+<div class = "row">
+<div class = "col-md-6">
 ```{r}
 # get party funds by county
 party_funds_by_county <- pcf %>%
@@ -899,9 +903,8 @@ ggiraph(code = print(total_map),
         hover_css = "cursor:pointer;stroke-width:5px;",
         tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
 ```
-
-This of course though should not be too surprising as it closely mirrors the population that the map represents. We could get county population data from a number of places, but I have chosen to scrape the latest census data from pennsylvania-demographics.com. The original population data can be found [here](https://www.pennsylvania-demographics.com/counties_by_population).
-
+</div>
+<div class = "col-md-6">
 ```{r}
 # scrape and format county population data
 url <- "https://www.pennsylvania-demographics.com/counties_by_population"
@@ -947,6 +950,8 @@ ggiraph(code = print(pop_map),
         hover_css = "cursor:pointer;stroke-width:5px;",
         tooltip_extra_css = tooltip_css, tooltip_opacity = 0.75)
 ```
+</div>
+</div>
 
 Now we can explore the political direction towards which these contributions were directed in each county. We could group contributions by any candidate but it makes the most sense to group by Democrat vs. Republican donations, and then fill with opposing party colors. As shown in the map below, the Philadelphia and Pittsburgh metro areas, Lackawanna county (the Scranton metro area), and Centre (home to State College) posted large Democratic advantages in fundraising. Many other counties, particularly on the eastern border, witnessed only slight Democratic advantages.
 
