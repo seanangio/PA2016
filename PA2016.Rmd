@@ -11,7 +11,7 @@ output:
   pdf_document:
     toc: yes
 ---
-<base target="_blank"/>
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, cache = TRUE, out.width = "70%", fig.align = "center")
 options(knitr.table.format = "html") 
@@ -47,11 +47,12 @@ It is also interesting to compare the geographic distribution of political contr
 
 We would expect to find a relationship between the party raising the most money in a county and the party receiving the most votes. In 50 counties, the party raising the most money did see its candidate receive the most votes. However, in 16 counties, Trump received more votes than Clinton despite Democrats outraising Republicans in the same county. In only 1 county did Clinton outperform Trump at the ballot booth despite Republicans outraising Democrats. In fact, in nearly all cases, Clinton's share in the vote was less than the share of political contributions slated for Democratic candidates.
 
-I have hidden the code in the final document for easier viewing, but please do see the original .Rmd or .md for the code producing this report in [GitHub](https://github.com/seanangio/PA2016).
+I have hidden the code in the final document for easier viewing, but please do see the original .Rmd or .md for the code producing this report in
+<a href="https://github.com/seanangio/PA2016" target="_blank">GitHub</a>.
 
 # Importing the Data
 
-The original data, as provided by the Federal Election Commission (FEC), was found [here](http://fec.gov/disclosurep/PDownload.do), but it appears it is no longer available as they are updating their website. Please find the csv file in the Github repository until the new link can be given. Please note that the data does not include any super-PAC money, which by its nature is not officially donated to candidates themselves.
+The original data, as provided by the Federal Election Commission (FEC), was found <a href="http://fec.gov/disclosurep/PDownload.do" target="_blank">here</a>, but it appears it is no longer available as they are updating their website. Please find the csv file in the Github repository until the new link can be given. Please note that the data does not include any super-PAC money, which by its nature is not officially donated to candidates themselves.
 
 ```{r message=FALSE, warning=FALSE}
 # original link given but may no longer be available
@@ -230,7 +231,7 @@ large_contbr <- pcf %>%
 
 On the other hand we have some very large contributions. `r format(large_contbr, big.mark = ",")` contributions exceed the maximum legal limit of $2,700.[^1]
 
-[^1]: According to the [FEC](https://transition.fec.gov/pages/brochures/citizens.shtml), $2,700 is the maximum amount an individual can contribute to a federal candidate. Primary and general elections are considered separate elections. 
+[^1]: According to the <a href="https://transition.fec.gov/pages/brochures/citizens.shtml" target="_blank">FEC</a>, $2,700 is the maximum amount an individual can contribute to a federal candidate. Primary and general elections are considered separate elections. 
 
 Ideally, it would be possible to match up positive and negative contributions from each contributor, but there seems to be no reliable way to do that from the data at hand. `contbr_nm` is not a primary key (people have the same names and small errors are easy to find). 
 
@@ -775,7 +776,7 @@ cand_sums %>%
 
 The last few steps to our analysis have a geographic focus. It is well known that political support varies widely by geography, commonly along urban and rural divides. Our dataset has the zip code of each contribution so that will be our starting point.
 
-First, we have to remove a few errors in our data-- zip codes clearly not from PA. One way to get this data would be from the `zipcode` package. However, we also need to be able to link zip codes with counties. I found a record of this data [here](https://www.unitedstateszipcodes.org/zip-code-database/) at unitedstateszipcodes.org. After downloading the free version, I joined latitude, longitude and county names to a data frame of contributions summed per zip code. Considering that a zip code represents such a small area, it can be difficult to visualize. However, we can get a sense of the geographic disparity if we redundantly map contribution totals to point size, color, and alpha shading. Enable the zoom function below, particularly in the Philadelphia region, to see the concentration of financing.
+First, we have to remove a few errors in our data-- zip codes clearly not from PA. One way to get this data would be from the `zipcode` package. However, we also need to be able to link zip codes with counties. I found a record of this data <a href="https://www.unitedstateszipcodes.org/zip-code-database/" target="_blank">here</a> at unitedstateszipcodes.org. After downloading the free version, I joined latitude, longitude and county names to a data frame of contributions summed per zip code. Considering that a zip code represents such a small area, it can be difficult to visualize. However, we can get a sense of the geographic disparity if we redundantly map contribution totals to point size, color, and alpha shading. Enable the zoom function below, particularly in the Philadelphia region, to see the concentration of financing.
 
 ```{r message=FALSE}
 # get zips, counties, coordinates
@@ -852,7 +853,7 @@ datatable(
 
 For some purposes, zip code is too small of a geographic unit to communicate clear trends. We can aggregate zip codes into counties. Before looking at county totals by party however, we should first observe the disparity in total contributions. If we fill the county map by total contributions (the map on the left), we can see that the majority of contributions come from a few counties surrounding the two major metropolitan areas, Philadelphia and Pittsburgh. 
 
-This of course though should not be too surprising as it closely mirrors the population that the map represents (shown on the right). We could get county population data from a number of places, but I have chosen to scrape the latest census data from pennsylvania-demographics.com. The original population data can be found [here](https://www.pennsylvania-demographics.com/counties_by_population). Mouse over the county for exact figures.
+This of course though should not be too surprising as it closely mirrors the population that the map represents (shown on the right). We could get county population data from a number of places, but I have chosen to scrape the latest census data from pennsylvania-demographics.com. The original population data can be found <a href="https://www.pennsylvania-demographics.com/counties_by_population" target="_blank">here</a>. Mouse over the county for exact figures.
 
 <div class = "row">
 <div class = "col-md-6">
@@ -1030,7 +1031,7 @@ ggiraph(code = print(funds_split),
 
 Ultimately, campaigns are about votes. We should expect to find a relationship between political contributions and vote totals. Namely, we would expect that greater contributions to a party (or a candidate) from a certain area suggests greater political support for that party, and therefore that support will translate into a greater number of votes. We can test the extent to which this plausible relationship holds in this case by comparing the campaign finance data to the election results.
 
-I scraped the election data from the New York Times, available [here](https://www.nytimes.com/elections/results/pennsylvania). As the plot below shows, despite a large fundraising advantage, Clinton narrowly lost the election in Pennsylvania, and all of its 20 electoral college votes, to Trump by fewer than 50,000 votes.
+I scraped the election data from the New York Times, available <a href="https://www.nytimes.com/elections/results/pennsylvania" target="_blank">here</a>. As the plot below shows, despite a large fundraising advantage, Clinton narrowly lost the election in Pennsylvania, and all of its 20 electoral college votes, to Trump by fewer than 50,000 votes.
 
 ```{r include=FALSE, eval=FALSE}
 # count counties by party fund total
