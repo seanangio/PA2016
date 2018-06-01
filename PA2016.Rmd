@@ -11,7 +11,7 @@ output:
   pdf_document:
     toc: yes
 ---
-
+<base target="_blank"/>
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = FALSE, cache = TRUE, out.width = "70%", fig.align = "center")
 options(knitr.table.format = "html") 
@@ -47,7 +47,7 @@ It is also interesting to compare the geographic distribution of political contr
 
 We would expect to find a relationship between the party raising the most money in a county and the party receiving the most votes. In 50 counties, the party raising the most money did see its candidate receive the most votes. However, in 16 counties, Trump received more votes than Clinton despite Democrats outraising Republicans in the same county. In only 1 county did Clinton outperform Trump at the ballot booth despite Republicans outraising Democrats. In fact, in nearly all cases, Clinton's share in the vote was less than the share of political contributions slated for Democratic candidates.
 
-I have hidden the code in the final document for easier viewing, but please do see the original .Rmd or .md for the code producing this report.
+I have hidden the code in the final document for easier viewing, but please do see the original .Rmd or .md for the code producing this report in [GitHub](https://github.com/seanangio/PA2016).
 
 # Importing the Data
 
@@ -55,10 +55,10 @@ The original data, as provided by the Federal Election Commission (FEC), was fou
 
 ```{r message=FALSE, warning=FALSE}
 # original link given but may no longer be available
-if (!file.exists("P00000001-PA.csv")) {
-    url <- "ftp://ftp.fec.gov/FEC/Presidential_Map/2016/P00000001/P00000001-PA.zip"
-    download.file(url, dest = "P00000001-PA.csv", mode = "wb") 
-}
+#if (!file.exists("P00000001-PA.csv")) {
+#    url <- "ftp://ftp.fec.gov/FEC/Presidential_Map/2016/P00000001/P00000001-PA.zip"
+#    download.file(url, dest = "P00000001-PA.csv", mode = "wb") 
+#}
 
 pcf <- read_csv('P00000001-PA.csv')
 ```
@@ -905,7 +905,7 @@ ggiraph(code = print(total_map),
 ```
 </div>
 <div class = "col-md-6">
-```{r}
+```{r eval=FALSE}
 # scrape and format county population data
 url <- "https://www.pennsylvania-demographics.com/counties_by_population"
 county_pops <- read_html(url) %>%
@@ -919,6 +919,13 @@ county_pops <- read_html(url) %>%
     select(-etc) %>%
     mutate(county = str_to_lower(county),
            population = parse_number(population)) 
+
+# output file to avoid scraping again
+saveRDS(county_pops, file = "county_pops.rds")
+```
+```{r}
+# read in county population data
+county_pops <- readRDS("county_pops.rds")
 
 # then join with pa map data
 pa_map_pop <- map_data("county") %>%
@@ -1025,7 +1032,7 @@ Ultimately, campaigns are about votes. We should expect to find a relationship b
 
 I scraped the election data from the New York Times, available [here](https://www.nytimes.com/elections/results/pennsylvania). As the plot below shows, despite a large fundraising advantage, Clinton narrowly lost the election in Pennsylvania, and all of its 20 electoral college votes, to Trump by fewer than 50,000 votes.
 
-```{r include=FALSE}
+```{r include=FALSE, eval=FALSE}
 # count counties by party fund total
 party_funds_by_county %>%
     mutate(more_funds = ifelse(Democrat > Republican, "Democrat", "Republican")) %>%
@@ -1053,6 +1060,14 @@ county_votes <- read_html(url) %>%
         Trump = parse_number(Trump),
         Clinton = parse_number(Clinton)
         )
+
+# output a file to avoid scraping again
+saveRDS(county_votes, file = "county_votes.rds")
+```
+
+```{r include=FALSE}
+# read in county vote data
+county_votes <- readRDS("county_votes.rds")
 
 county_results <- party_funds_by_county %>%
     left_join(county_votes, by = "county") %>%
